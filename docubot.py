@@ -9,6 +9,33 @@ Core DocuBot class responsible for:
 
 import os
 import glob
+import re
+
+
+_STOP_WORDS = {
+    "a", "all", "an", "and", "any", "are", "as", "at", "be", "by", "can", "do",
+    "docs", "does", "for", "from", "how", "i", "in", "is", "it", "mention", "of",
+    "on", "or", "that", "the", "these", "there", "this", "to", "what",
+    "when", "where", "which", "who", "with",
+}
+
+
+def _words(text):
+    words = set()
+    for word in re.findall(r"[^\W_]+", text.lower()):
+        if word in _STOP_WORDS:
+            continue
+        if len(word) > 5 and word.endswith(("ing", "ion")):
+            word = word[:-3]
+        elif len(word) > 4 and word.endswith("ed"):
+            word = word[:-2]
+        elif len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+            word = word[:-1]
+        if len(word) > 4 and word.endswith("e"):
+            word = word[:-1]
+        words.add(word)
+    return words
+
 
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
@@ -50,7 +77,6 @@ class DocuBot:
 
     def build_index(self, documents):
         """
-        TODO (Phase 1):
         Build a tiny inverted index mapping lowercase words to the documents
         they appear in.
 
@@ -60,11 +86,13 @@ class DocuBot:
             "database": ["DATABASE.md"]
         }
 
-        Keep this simple: split on whitespace, lowercase tokens,
-        ignore punctuation if needed.
+        Words are case insensitive, common filler words are omitted, and
+        underscores separate identifier components.
         """
         index = {}
-        # TODO: implement simple indexing
+        for filename, text in documents:
+            for word in _words(text):
+                index.setdefault(word, []).append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -73,33 +101,68 @@ class DocuBot:
 
     def score_document(self, query, text):
         """
-        TODO (Phase 1):
         Return a simple relevance score for how well the text matches the query.
 
-        Suggested baseline:
-        - Convert query into lowercase words
-        - Count how many appear in the text
-        - Return the count as the score
+        Count distinct query words that appear in the document.
         """
-        # TODO: implement scoring
-        return 0
+        return len(_words(query) & _words(text))
 
     def retrieve(self, query, top_k=3):
         """
-        TODO (Phase 1):
-        Use the index and scoring function to select top_k relevant document snippets.
+        Use the index and scoring function to select up to top_k paragraphs.
 
-        Return a list of (filename, text) sorted by score descending.
+        Return (filename, paragraph) pairs sorted by score descending. Require
+        all meaningful query words in the document and at least half in the
+        paragraph or its headings, including a match in the paragraph itself.
         """
+        if top_k < 0:
+            raise ValueError("top_k must be non-negative")
+
+        query_words = _words(query)
+        if not query_words:
+            return []
+
+        candidates = None
+        for word in query_words:
+            matches = set(self.index.get(word, ()))
+            candidates = matches if candidates is None else candidates & matches
+
         results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+        for filename, text in self.documents:
+            if filename not in candidates:
+                continue
+            headings = {}
+            for paragraph in re.split(r"\n\s*\n", text.strip()):
+                paragraph = paragraph.strip()
+                if not paragraph:
+                    continue
+                heading = re.fullmatch(r"(#{1,6})\s+(.+)", paragraph)
+                if heading:
+                    level = len(heading.group(1))
+                    headings = {key: value for key, value in headings.items() if key < level}
+                    headings[level] = paragraph
+                    continue
+                if not self.score_document(query, paragraph):
+                    continue
+                context = "\n".join([*headings.values(), paragraph])
+                score = self.score_document(query, context)
+                if score >= min(2, len(query_words)) and score * 2 >= len(query_words):
+                    snippet = f"{headings[max(headings)]}\n\n{paragraph}" if headings else paragraph
+                    heading_score = self.score_document(query, "\n".join(headings.values()))
+                    specificity = sum(
+                        1 / len(self.index[word])
+                        for word in query_words & _words(context)
+                    )
+                    results.append((score, heading_score, specificity, filename, snippet))
+
+        results.sort(key=lambda result: result[:3], reverse=True)
+        return [(filename, text) for _, _, _, filename, text in results[:top_k]]
 
     # -----------------------------------------------------------
     # Answering Modes
     # -----------------------------------------------------------
 
-    def answer_retrieval_only(self, query, top_k=3):
+    def answer_retrieval_only(self, query, top_k=1):
         """
         Phase 1 retrieval only mode.
         Returns raw snippets and filenames with no LLM involved.

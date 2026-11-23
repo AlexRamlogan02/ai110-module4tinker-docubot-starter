@@ -1,147 +1,101 @@
 # DocuBot Model Card
 
-This model card is a short reflection on your DocuBot system. Fill it out after you have implemented retrieval and experimented with all three modes:
-
-1. Naive LLM over full docs  
-2. Retrieval only  
-3. RAG (retrieval plus LLM)
-
-Use clear, honest descriptions. It is fine if your system is imperfect.
-
----
-
 ## 1. System Overview
 
-**What is DocuBot trying to do?**  
-Describe the overall goal in 2 to 3 sentences.
+DocuBot helps developers explore a small collection of documentation and
+compare ungrounded generation, retrieval, and retrieval-augmented generation
+(RAG). The documents describe a sample application; they are not themselves a
+running backend.
 
-> _Your answer here._
-
-**What inputs does DocuBot take?**  
-For example: user question, docs in folder, environment variables.
-
-> _Your answer here._
-
-**What outputs does DocuBot produce?**
-
-> _Your answer here._
-
----
+Inputs are a question, Markdown or text files in the docs folder, and, for LLM
+modes, a Gemini API key. Outputs are generated answers, retrieved passages with
+filenames, or a refusal when retrieval finds no qualifying passage.
 
 ## 2. Retrieval Design
 
-**How does your retrieval system work?**  
-Describe your choices for indexing and scoring.
+DocuBot builds an inverted index from normalized words to filenames. It
+lowercases words, removes common filler words, splits identifier components,
+and applies simple suffix normalization. Candidate documents must contain all
+meaningful query words.
 
-- How do you turn documents into an index?
-- How do you score relevance for a query?
-- How do you choose top snippets?
+Documents are split into paragraphs. A paragraph and its headings must match
+at least half the query words and at least two when the query has two or more;
+at least one word must match the paragraph itself. Results are ranked by
+overlap, heading matches, and word specificity. Retrieval-only mode returns
+one paragraph by default; RAG uses up to three.
 
-> _Your answer here._
-
-**What tradeoffs did you make?**  
-For example: speed vs precision, simplicity vs accuracy.
-
-> _Your answer here._
-
----
+This design is simple and requires no embedding model, but lexical matching
+can miss synonyms or select text that shares words without answering the
+question.
 
 ## 3. Use of the LLM (Gemini)
 
-**When does DocuBot call the LLM and when does it not?**  
-Briefly describe how each mode behaves.
+- **Naive mode:** Calls Gemini with the question only. Despite the mode name,
+  the current implementation ignores the supplied documentation text.
+- **Retrieval only:** Returns a source paragraph without calling Gemini.
+- **RAG:** Retrieves passages and calls Gemini only if there are matches.
+  The prompt asks it to use only those passages, refuse when evidence is
+  insufficient, and mention source files.
 
-- Naive LLM mode:
-- Retrieval only mode:
-- RAG mode:
-
-> _Your answer here._
-
-**What instructions do you give the LLM to keep it grounded?**  
-Summarize the rules from your prompt. For example: only use snippets, say "I do not know" when needed, cite files.
-
-> _Your answer here._
-
----
+The configured model is `gemini-3.1-flash-lite`. Prompt instructions and
+citations improve traceability but do not guarantee a correct answer.
 
 ## 4. Experiments and Comparisons
 
-Run the **same set of queries** in all three modes. Fill in the table with short notes.
+The following observations are from [NOTES.md](NOTES.md). Not every question
+was tested in every mode; differently worded questions are identified.
 
-You can reuse or adapt the queries from `dataset.py`.
+| Question | Naive mode | Retrieval only | RAG |
+|---|---|---|---|
+| Where is the auth token generated? | Asked for context and gave general advice; missed the documented function. | Returned the token-generation paragraph from `AUTH.md`. | Named `generate_access_token` in `auth_utils.py` and cited `AUTH.md`. |
+| Where can I pay for groceries? | Not tested. | Said it did not know. | Not tested with this exact wording; "Where can I buy groceries?" received the same refusal. |
+| Where is the logic for payment processing? | Not tested. | Not tested. | Said it did not know. |
+| Which fields are stored in the users table? | Not tested. | Retrieval found no qualifying passage in the sample evaluation. | Not tested; the same retrieval result would cause a refusal before the model is called. |
 
-| Query | Naive LLM: helpful or harmful? | Retrieval only: helpful or harmful? | RAG: helpful or harmful? | Notes |
-|------|---------------------------------|--------------------------------------|---------------------------|-------|
-| Example: Where is the auth token generated? | | | | |
-| Example: How do I connect to the database? | | | | |
-| Example: Which endpoint lists all users? | | | | |
-| Example: How does a client refresh an access token? | | | | |
-
-**What patterns did you notice?**  
-
-- When does naive LLM look impressive but untrustworthy?  
-- When is retrieval only clearly better?  
-- When is RAG clearly better than both?
-
-> _Your answer here._
-
----
+Naive mode sounded helpful but was not grounded in the docs. Retrieval-only
+returned direct evidence, while RAG produced a more concise answer with a
+source for the auth question. These examples do not establish that RAG is
+always correct.
 
 ## 5. Failure Cases and Guardrails
 
-**Describe at least two concrete failure cases you observed.**  
-For each one, say:
+- **Auth token, naive mode:** The answer suggested generic places to search
+  rather than the documented function. A grounded answer should identify
+  `generate_access_token` in `auth_utils.py`.
+- **Users-table fields, retrieval:** The sample evaluation found no passage,
+  even though the database guide lists the fields. It should retrieve the
+  relevant table; RAG inherits the same failure.
 
-- What was the question?  
-- What did the system do?  
-- What should have happened instead?
-
-> _Failure case 1 here._
-
-> _Failure case 2 here._
-
-**When should DocuBot say “I do not know based on the docs I have”?**  
-Give at least two specific situations.
-
-> _Your answer here._
-
-**What guardrails did you implement?**  
-Examples: refusal rules, thresholds, limits on snippets, safe defaults.
-
-> _Your answer here._
-
----
+The assistant should refuse when the docs contain no relevant information,
+such as the grocery or payment questions, or when retrieved passages do not
+provide enough evidence. Retrieval applies matching thresholds and limits the
+number of passages; RAG also instructs the model to refuse unsupported answers.
+These guardrails are heuristic and can both reject valid answers and allow
+irrelevant passages through.
 
 ## 6. Limitations and Future Improvements
 
-**Current limitations**  
-List at least three limitations of your DocuBot system.
+**Limitations**
 
-1. _Limitation 1_
-2. _Limitation 2_
-3. _Limitation 3_
+1. Naive mode does not include documentation in its prompt.
+2. Exact-ish word matching can miss relevant passages with different wording.
+3. RAG depends on retrieved evidence and can still misinterpret it or generate
+   unsupported claims.
+4. The evaluation checks filenames, not answer correctness, and counts
+   questions without expected filenames as misses.
 
-**Future improvements**  
-List two or three changes that would most improve reliability or usefulness.
+**Future improvements**
 
-1. _Improvement 1_
-2. _Improvement 2_
-3. _Improvement 3_
-
----
+1. Improve retrieval for synonyms and structured content such as tables.
+2. Evaluate answer quality and correct refusals, not just retrieved filenames.
+3. Compare the same questions across all modes, including more failure cases.
 
 ## 7. Responsible Use
 
-**Where could this system cause real world harm if used carelessly?**  
-Think about wrong answers, missing information, or over trusting the LLM.
+Incorrect or unsupported guidance about authentication, configuration, or
+data handling could lead developers to make unsafe changes. Sample documents
+may also differ from the actual application being examined.
 
-> _Your answer here._
-
-**What instructions would you give real developers who want to use DocuBot safely?**  
-Write 2 to 4 short bullet points.
-
-- _Guideline 1_
-- _Guideline 2_
-- _Guideline 3 (optional)_
-
----
+- Verify answers and citations against the original documentation and code.
+- Treat refusals as uncertainty, not proof that information does not exist.
+- Do not rely on generated guidance alone for security-sensitive decisions.
